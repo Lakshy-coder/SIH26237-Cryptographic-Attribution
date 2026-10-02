@@ -18,13 +18,13 @@ export interface InvestigationResult {
 // A /api/investigate endpoint must exist (or we call the investigator service indirectly).
 // For the MVP demo the backend exposes /api/investigate which wraps the Python investigator.
 export async function investigateArtifact(file: File): Promise<InvestigationResult> {
-  const arrayBuffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(arrayBuffer);
-  const b64 = btoa(String.fromCharCode(...bytes));
+  const form = new FormData();
+  form.append('file', file, file.name || 'artifact.pdf');
 
+  // apiFetch wraps fetch and will forward headers; when sending FormData do not set content-type.
   return apiFetch<InvestigationResult>('/api/investigate', {
     method: 'POST',
-    body: JSON.stringify({ pdf_b64: b64 }),
+    body: form as unknown as BodyInit,
   });
 }
 

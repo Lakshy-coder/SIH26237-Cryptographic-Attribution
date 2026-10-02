@@ -19,6 +19,10 @@ proposal_lock = asyncio.Lock()
 VALIDATOR_PK, VALIDATOR_SK = generate_sig_keypair()
 VALIDATOR_PK_B64 = base64.b64encode(VALIDATOR_PK).decode('utf-8')
 
+# Trusted validators mapping: node_id -> public_key_b64
+# For MVP this can be populated at startup or modified in tests.
+TRUSTED_VALIDATORS: dict = {}
+
 LEDGER_URLS = os.getenv("LEDGER_URLS", "").split(",")
 
 class DecryptionEventTx(BaseModel):
@@ -71,12 +75,35 @@ async def commit(proposal: BlockProposal):
         # We should verify the signatures in the block
         if len(block.validator_signatures) < 2:
             raise HTTPException(status_code=400, detail="Insufficient endorsements")
-            
+
+        # Enforce distinct validator identities: duplicate node_id endorsements do not increase quorum
+        node_ids = [end.get("node_id") for end in block.validator_signatures]
+        distinct_node_ids = set(node_ids)
+        if len(distinct_node_ids) < 2:
+            raise HTTPException(status_code=400, detail="Insufficient distinct validator endorsements")
+
+        # Verify each endorsement signature cryptographically and against trusted registry
         for end in block.validator_signatures:
-            pk = base64.b64decode(end["public_key"])
-            sig = base64.b64decode(end["signature"])
-            msg = block.hash.encode('utf-8')
-            if not verify_signature(msg, sig, pk):
+            node_id = end.get("node_id")
+            pk_b64 = end.get("public_key")
+            sig_b64 = end.get("signature")
+
+            # Ensure we have a trusted public key for this node
+            trusted_pk = TRUSTED_VALIDATORS.get(node_id)
+            if trusted_pk is None:
+                raise HTTPException(status_code=400, detail=f"Unknown validator: {node_id}")
+            if trusted_pk != pk_b64:
+                raise HTTPException(status_code=400, detail=f"Validator public key mismatch for {node_id}")
+
+            try:
+                pk = base64.b64decode(pk_b64)
+                sig = base64.b64decode(sig_b64)
+                msg = block.hash.encode('utf-8')
+                if not verify_signature(msg, sig, pk):
+                    raise HTTPException(status_code=400, detail="Invalid endorsement signature")
+            except HTTPException:
+                raise
+            except Exception:
                 raise HTTPException(status_code=400, detail="Invalid endorsement signature")
                 
         storage.add_block(block)

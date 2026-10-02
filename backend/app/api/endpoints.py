@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Request
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
@@ -6,6 +6,10 @@ import uuid
 import base64
 
 from backend.app.db import get_db, Recipient, Document, Envelope
+import os
+import tempfile
+import hashlib
+from investigator.attribution import Investigator
 from crypto.kem import KEM_ALG
 from crypto.signatures import SIG_ALG
 from crypto.symmetric import generate_dek, encrypt_document, hash_sha256
@@ -20,11 +24,14 @@ class RegisterRequest(BaseModel):
 @router.post("/register")
 def register_recipient(req: RegisterRequest, db: Session = Depends(get_db)):
     rec = db.query(Recipient).filter(Recipient.id == req.recipient_id).first()
-    if not rec:
-        rec = Recipient(id=req.recipient_id)
-        db.add(rec)
+    if rec:
+        # Prevent silent overwrite of an existing recipient's cryptographic identity.
+        raise HTTPException(status_code=409, detail="Recipient already registered")
+
+    rec = Recipient(id=req.recipient_id)
     rec.ml_kem_public_key = base64.b64decode(req.ml_kem_public_key)
     rec.ml_dsa_public_key = base64.b64decode(req.ml_dsa_public_key)
+    db.add(rec)
     db.commit()
     return {"status": "ok"}
 
@@ -99,3 +106,28 @@ def create_session(req: SessionRequest, db: Session = Depends(get_db)):
         "encrypted_payload_b64": base64.b64encode(doc.encrypted_payload).decode('utf-8'),
         "envelope_b64": base64.b64encode(env.wrapped_dek).decode('utf-8')
     }
+
+
+@router.post("/investigate")
+async def investigate_artifact(request: Request, file: UploadFile = File(...)):
+    """Accept an uploaded leaked PDF via multipart/form-data and proxy to the Investigator.
+
+    Returns a structured JSON result from the Investigator implementation.
+    """
+    contents = await file.read()
+
+    # Build investigator using environment-configured ledger URLs (docker-compose sets LEDGER_URLS)
+    ledger_urls = os.getenv("LEDGER_URLS", "http://validator1:8001,http://validator2:8002,http://validator3:8003").split(",")
+
+    # Derive backend_url from the incoming request's base URL so Investigator can call identity registry.
+    base = str(request.base_url).rstrip('/')
+
+    inv = Investigator(backend_url=base, ledger_urls=[u.strip() for u in ledger_urls if u.strip()])
+
+    try:
+        result = inv.investigate(contents)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Ensure response is JSON serializable
+    return result

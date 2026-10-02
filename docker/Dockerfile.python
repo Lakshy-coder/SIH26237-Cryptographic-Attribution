@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 
 # Build liboqs from source to get latest PQC algorithms (ML-KEM and ML-DSA)
 WORKDIR /opt
-RUN git clone -b main https://github.com/open-quantum-safe/liboqs.git && \
+RUN git clone -b main --depth 1 https://github.com/open-quantum-safe/liboqs.git && \
     cd liboqs && \
     mkdir build && cd build && \
     cmake -GNinja -DOQS_USE_OPENSSL=ON -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=/usr/local .. && \
@@ -23,7 +23,7 @@ RUN git clone -b main https://github.com/open-quantum-safe/liboqs.git && \
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 # Install liboqs-python
-RUN git clone -b main https://github.com/open-quantum-safe/liboqs-python.git && \
+RUN git clone -b main --depth 1 https://github.com/open-quantum-safe/liboqs-python.git && \
     cd liboqs-python && \
     pip install .
 

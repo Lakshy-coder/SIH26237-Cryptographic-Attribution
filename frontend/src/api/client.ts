@@ -3,8 +3,14 @@ export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
 export const LEDGER_URLS = (import.meta.env.VITE_LEDGER_URLS ?? 'http://localhost:8001,http://localhost:8002,http://localhost:8003').split(',');
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  const isForm = options?.body instanceof FormData;
+  const headers = { ...options?.headers } as Record<string, string> | undefined;
+  if (!isForm) {
+    headers['Content-Type'] = 'application/json';
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers,
     ...options,
   });
   if (!res.ok) {
