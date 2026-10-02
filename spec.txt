@@ -1,0 +1,472 @@
+SIH 2026 - SIH26237
+Cryptographic Attribution and Immutable Decryption Provenance
+Antigravity Technical Build Specification
+Ministry of Defence - Indian Navy (WESEE) | Blockchain & Cybersecurity
+
+Source basis: the user's revised architecture document for SIH26237, with the crypto naming/standard references cross-checked against current NIST/OQS material.
+
+1. Problem and Exact Outcome
+Source basis: the user's revised SIH26237 architecture document. Crypto naming and standard references were cross-checked against current NIST/OQS documentation.
+
+2. Frozen Architecture
+
+Users
+  Sender UI -------------------------------> Application API
+  Recipient UI -----> Recipient Agent ----> Session / Distribution APIs
+  Investigator UI -------------------------> Investigation API
+
+Application Zone
+  Auth/RBAC
+  Identity Registry
+  Document Service
+  Decryption Session Service
+  Crypto Module (public-key operations + symmetric primitives as applicable)
+  Investigation Service
+  Encrypted Object Store
+  PostgreSQL
+
+Recipient Zone
+  Recipient Decryption Agent
+    - ML-KEM private key
+    - ML-DSA private key
+    - local keystore
+    - local decryption + watermark pipeline
+    - event signing
+
+Ledger Zone
+  Collector -> Validator 1
+            -> Validator 2
+            -> Validator 3
+  Each validator:
+    - validates event
+    - validates block proposal
+    - signs block header
+    - stores replicated chain
+  Finality: M-of-N quorum endorsement
+
+Forensics
+  Leaked PDF -> Watermark Extractor -> watermark_ref
+             -> Ledger Lookup -> Event + Signature + Block Proof
+             -> Verify Identity + Signature + Chain + Quorum
+             -> Attribution Report
+2.1 Trust Boundaries
+
+3. End-to-End Protocol
+3.1 Registration
+Offline Identity Authority
+  1. Generate recipient ML-KEM key pair.
+  2. Generate recipient ML-DSA signing key pair.
+  3. Bind public keys to identity_id and key_epoch.
+  4. Issue signed identity certificate.
+  5. Deliver encrypted private-key bundle to recipient agent.
+  6. Server stores only public keys/certificates.
+3.2 Document Encryption and Distribution
+Sender
+  plaintext PDF
+     |
+     v
+random 256-bit DEK
+     |
+     +--> AES-256-GCM --> encrypted document
+     |
+     +--> for each recipient:
+             ML-KEM.Encaps(recipient_kem_pk)
+                     |
+                     v
+                 shared secret
+                     |
+                 HKDF -> KEK
+                     |
+                 AES-GCM wrap(DEK)
+                     |
+             recipient envelope
+3.3 Decryption, Attestation, and Release
+1. Recipient requests a decryption session.
+2. Server creates session_id + server_nonce and checks authorization.
+3. Recipient agent supplies/creates client_nonce.
+4. Agent obtains the encrypted package and recipient envelope.
+5. Agent decapsulates the KEM ciphertext with its ML-KEM private key.
+6. Agent derives the DEK and decrypts the document locally.
+7. Agent derives watermark_ref from session/document/key/nonces.
+8. Agent embeds the watermark and computes artifact_sha256.
+9. Agent constructs canonical DecryptionEvent.
+10. Recipient agent signs DecryptionEvent with ML-DSA.
+11. Signed event is sent to the Ledger Collector.
+12. Validators verify event, authorization, nonce/session uniqueness and block linkage.
+13. Block becomes final only after M-of-N validator endorsements.
+14. Commitment proof is returned to the agent.
+15. Watermarked artifact is released only after ledger finality/commit confirmation.
+
+4. Cryptographic Specification
+Use standardized PQC primitives for their intended roles. Keep KEM, signatures, symmetric encryption, hashes and token derivation as separate concerns.
+
+
+4.1 Decryption Event
+{
+  "event_version": 1,
+  "event_id": "evt_...",
+  "session_id": "sess_...",
+  "document_id": "doc_...",
+  "document_sha256": "base64url...",
+  "recipient_id": "id_...",
+  "recipient_signing_key_hash": "sha256:...",
+  "watermark_ref": "base64url...",
+  "watermark_algorithm": "dwt-dct-qim-v1",
+  "client_nonce": "base64url...",
+  "server_nonce": "base64url...",
+  "artifact_sha256": "base64url...",
+  "timestamp_unix": 0,
+  "key_epoch": 3
+}
+
+signature = ML-DSA.Sign(
+  recipient_private_key,
+  CANONICAL_ENCODE(event)
+)
+4.2 Key Handling
+Recipient private ML-KEM and ML-DSA keys never enter PostgreSQL or the application API payloads.
+For MVP, store encrypted private-key material in the recipient agent keystore.
+For production evolution, expose a PKCS#11/HSM/TPM-backed key-provider interface.
+Public keys and certificate fingerprints are stored server-side and used for verification.
+Key epochs are retained so historical signatures remain verifiable after rotation.
+Revocation blocks new decryption/grant use but does not erase or invalidate historical ledger evidence.
+5. Forensic Watermark Specification
+5.1 Payload
+Binary payload (128 bits total for MVP)
+  [0..95]     watermark_ref (96 bits)
+  [96..111]   doc_tag (16 bits)
+  [112..127]  CRC16
+
+Full attribution metadata remains outside the watermark in the signed ledger event.
+5.2 Token derivation
+wm_ref = SHAKE256(
+    session_id ||
+    document_sha256 ||
+    recipient_signing_key_hash ||
+    client_nonce ||
+    server_nonce ||
+    watermark_algorithm_version,
+    output_length = 12 bytes
+)
+5.3 Embedding strategy
+Render each PDF page at a fixed, controlled DPI to a raster representation.
+Apply a DWT transform and optional block-level DCT/QIM component.
+Spread payload bits over many coefficients using a pseudorandom sequence.
+Repeat the payload across multiple pages/tiles where capacity allows.
+Use FEC/CRC and majority voting during extraction.
+Reconstruct a visually equivalent PDF and compute artifact_sha256.
+Do not use metadata-only watermarking as the primary channel.
+For text-heavy PDFs, raster watermarking is the MVP path; native text-preserving watermarking is a future enhancement.
+5.4 Extraction
+Leaked PDF
+  -> detect/normalize pages
+  -> render at expected DPI
+  -> DWT/DCT transform
+  -> synchronization/pseudorandom sequence
+  -> recover soft bits
+  -> majority vote
+  -> FEC/CRC
+  -> watermark_ref + confidence
+  -> ledger lookup
+
+
+6. Permissioned Offline DLT
+The MVP should use a lightweight permissioned quorum-signed Merkle ledger. Present it as a DLT / tamper-evident ledger, not as a claim of implementing a full production BFT blockchain.
+Collector
+   |
+   v
+Leader proposes block
+   |
+   +--> Validator 1: verify + endorse
+   +--> Validator 2: verify + endorse
+   +--> Validator 3: verify + endorse
+   |
+   v
+M-of-N quorum
+   |
+   v
+Finalized block
+   |
+   v
+Replicated append-only chain
+6.1 Block fields
+{
+  "height": 102,
+  "previous_hash": "...",
+  "events_root": "...",
+  "state_root": "...",
+  "timestamp_unix": 1730001234,
+  "policy_version": 3,
+  "proposer_node_id": "node_2",
+  "proposer_signature": "...",
+  "validator_signatures": [
+    {"node_id": "node_1", "signature": "..."},
+    {"node_id": "node_3", "signature": "..."}
+  ]
+}
+6.2 Transaction fields
+{
+  "tx_id": "sha256:...",
+  "event": { "...signed DecryptionEvent..." },
+  "signature": "...",
+  "public_key_reference": "...",
+  "ledger_metadata": {
+    "collector_node": "collector_1",
+    "received_at_unix": 1730001235,
+    "policy_version": 3
+  }
+}
+6.3 Validation
+Verify recipient ML-DSA signature.
+Verify identity certificate/key binding.
+Verify recipient authorization for the document.
+Reject duplicate event/session/nonce values.
+Verify previous block hash and Merkle root.
+Validate timestamp against local policy.
+Require M-of-N validator signatures before finality.
+Store the same finalized block on honest validator replicas.
+Expose chain and transaction verification endpoints to investigators.
+6.4 Tamper detection
+Admin edits transaction on Validator 1
+      |
+      v
+Merkle root changes
+      |
+      v
+Block hash mismatch
+      |
+      v
+Successor previous_hash mismatch
+      |
+      +--> Validator 2/3 still contain original block
+      |
+      v
+Cross-node divergence + invalid signature/hash
+      |
+      v
+TAMPER DETECTED
+
+7. Data Model and API Contract
+7.1 Core entities
+
+7.2 API minimum
+
+8. Product UI / Demo Flow
+
+
+9. Frozen Technology Stack
+
+Current OQS project documentation confirms support for NIST-standardized ML-KEM and ML-DSA and provides examples for encapsulation/decapsulation and sign/verify. The exact liboqs/liboqs-python versions used in the repo should be pinned and validated offline before implementation proceeds.
+10. Repository Structure
+sih-crypto-attribution/
+├── README.md
+├── docker-compose.yml
+├── Makefile
+├── docs/
+│   ├── architecture.md
+│   ├── crypto.md
+│   ├── watermark.md
+│   ├── ledger.md
+│   ├── threat-model.md
+│   └── demo-script.md
+├── frontend/
+│   └── src/
+│       ├── pages/
+│       │   ├── sender/
+│       │   ├── recipient/
+│       │   └── investigator/
+│       ├── components/
+│       └── api/
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── api/
+│   │   ├── services/
+│   │   ├── models/
+│   │   ├── schemas/
+│   │   ├── auth/
+│   │   └── db.py
+│   └── tests/
+├── crypto/
+│   ├── pqc.py
+│   ├── kem.py
+│   ├── signatures.py
+│   ├── symmetric.py
+│   ├── canonical.py
+│   └── tests/
+├── watermark/
+│   ├── embed.py
+│   ├── extract.py
+│   ├── codec.py
+│   ├── transform.py
+│   ├── pdf_pipeline.py
+│   └── tests/
+├── ledger/
+│   ├── node.py
+│   ├── collector.py
+│   ├── block.py
+│   ├── merkle.py
+│   ├── verify.py
+│   ├── storage.py
+│   └── tests/
+├── agent/
+│   ├── recipient_agent.py
+│   ├── keystore.py
+│   ├── session.py
+│   └── tests/
+├── investigator/
+│   ├── attribution.py
+│   ├── evidence.py
+│   └── report.py
+├── scripts/
+└── docker/
+11. Three-Day Build Order
+
+11.1 Critical path
+ML-KEM key generation/encapsulation/decapsulation works.
+ML-DSA sign/verify works.
+AES-256-GCM document encryption/decryption works.
+Recipient agent holds private keys and can decrypt locally.
+Watermark embed/extract round trip works on the actual reconstructed PDF.
+Signed decryption event is committed before artifact release.
+Ledger chain and quorum verification works.
+Leak investigation performs real extraction, lookup and verification.
+11.2 Work that is deliberately deferred
+Full Hyperledger Fabric deployment.
+HSM/TPM integration beyond the key-provider interface.
+Print-scan robust watermarking.
+Screen-camera robust watermarking.
+Large-scale multi-site validator federation.
+Formal security certification.
+12. Security and E2E Validation
+
+12.1 E2E golden test
+create users A/B/C
+  -> create 1 PDF
+  -> encrypt once
+  -> distribute to A/B/C
+  -> A decrypts => artifact_A + event_A
+  -> B decrypts => artifact_B + event_B
+  -> assert watermark_A != watermark_B
+  -> assert both ledger records valid
+  -> copy artifact_B as leaked.pdf
+  -> investigate leaked.pdf
+  -> assert attributed_recipient == B
+  -> tamper validator-1 transaction
+  -> assert chain verification detects divergence
+13. Air-Gapped Deployment
+Air-Gapped Network
+|
++-- App Host
+|    +-- FastAPI
+|    +-- React/Nginx
+|    +-- PostgreSQL
+|    +-- encrypted object storage
+|
++-- Ledger Validators
+|    +-- Validator 1
+|    +-- Validator 2
+|    +-- Validator 3
+|
++-- Recipient Workstations
+|    +-- local recipient agent
+|
++-- Internal support services
+     +-- internal NTP (optional)
+     +-- local registry / offline package store (build-time)
+No external KMS.
+No public blockchain RPC.
+No public NTP.
+No cloud identity provider.
+No runtime package installation from npm/pip/apt.
+Pin dependency versions and package hashes.
+Build/export Docker images on a connected build machine, then transfer them to the isolated environment.
+Keep SBOM and dependency manifests in the repository.
+14. MVP vs Production Boundary
+
+
+15. Single-Prompt Antigravity Build Instruction
+Paste the prompt below after attaching this document and the original PS. It is intentionally compact: it fixes the architecture, tells the coding agent to implement rather than speculate, and defines the non-negotiable acceptance path.
+You are the lead engineer implementing SIH26237 from the attached Technical Build Specification and the supplied Problem Statement. Treat those documents as the source of truth. Do not invent requirements, cloud services, external APIs, or extra AI features.
+
+GOAL
+Build a real, runnable MVP that proves this exact flow:
+PDF upload -> one-time AES-256-GCM encryption -> per-recipient ML-KEM-1024 key envelope -> recipient-local decryption -> unique invisible watermark -> recipient ML-DSA-65 signed decryption event -> offline permissioned quorum ledger -> release watermarked PDF -> leaked PDF upload -> watermark extraction -> ledger lookup -> signature + ledger verification -> recipient/session attribution.
+
+ARCHITECTURE
+Use:
+- React + TypeScript + Vite + Tailwind
+- Python 3.12 + FastAPI
+- PostgreSQL
+- liboqs/OQS for ML-KEM-1024 and ML-DSA-65
+- cryptography for AES-256-GCM, HKDF and approved hashes
+- NumPy + OpenCV + PyWavelets for raster DWT/DCT watermarking
+- custom permissioned quorum-signed Merkle ledger with 3 validator nodes for MVP
+- Docker Compose
+- pytest + httpx
+
+NON-NEGOTIABLE SECURITY RULES
+1. Recipient private ML-KEM and ML-DSA keys never enter the application DB or API responses.
+2. Recipient-local agent performs private-key operations.
+3. Recipient signs a canonical DecryptionEvent containing document hash, recipient/key reference, session ID, nonces, watermark_ref and artifact hash.
+4. Signed event MUST be accepted by the ledger before the watermarked document is released.
+5. If ledger commit/finality fails, do not release the document.
+6. Ledger must be append-only, hash-linked, Merkle-verifiable and require M-of-N validator endorsements.
+7. No public blockchain, cloud KMS, SaaS identity, public NTP or runtime internet dependency.
+8. Never claim absolute immutability or unremovable watermarking.
+9. If watermark extraction is weak/missing or ledger evidence cannot be verified, return INCONCLUSIVE rather than guessing attribution.
+
+IMPLEMENTATION ORDER
+1. Inspect the repository and create a clean modular structure.
+2. Implement crypto primitives and tests first.
+3. Implement identity, authorization and recipient agent.
+4. Implement document encryption/distribution and local decryption.
+5. Implement watermark embed/extract round-trip on real PDFs.
+6. Implement ledger nodes, Merkle root, hash chain, validator signatures and quorum.
+7. Integrate the invariant: signed event -> ledger finality -> artifact release.
+8. Implement investigation workflow and attribution report.
+9. Add the React screens needed for Sender, Recipient and Investigator.
+10. Add E2E tests and a tamper simulation.
+11. Update README with exact offline run commands.
+
+WATERMARK
+Use a compact 128-bit payload:
+[96-bit watermark_ref][16-bit doc_tag][16-bit CRC].
+Derive watermark_ref with SHAKE256 from session_id + document hash + recipient signing-key hash + client_nonce + server_nonce + algorithm version. Use raster page rendering and transform-domain embedding with redundancy/FEC. The extracted token must come from the actual leaked PDF, not from the database.
+
+LEDGER
+Use 3 validators for the MVP. A leader proposes a block. Each validator independently verifies:
+event signature, identity binding, authorization, uniqueness, previous hash and Merkle root. Finalize on 2-of-3 endorsements. Provide endpoints to query a transaction and verify the chain. Keep application DB state separate from ledger evidence.
+
+BUILD BEHAVIOR
+Do not stop after writing a plan. Create the files, install/build only when needed, run tests, fix errors, and leave the repo in a runnable state. Prefer a modular monolith over unnecessary microservices. Use real cryptographic operations and real watermark extraction. Avoid placeholder/mock implementations for core requirements.
+
+DONE WHEN
+- A real PDF can be distributed to at least 3 test recipients.
+- Two recipients produce distinct watermarked files.
+- ML-DSA signatures verify.
+- Ledger records reach quorum.
+- A saved leaked PDF yields the correct watermark_ref.
+- Investigation returns the correct recipient/session with valid signature and valid ledger proof.
+- Modifying one validator's record is detected.
+- Ledger failure prevents release.
+- `docker compose up` starts the system locally without internet.
+- Tests pass and README explains setup/demo.
+
+When a library/API has compatibility uncertainty, inspect installed versions and official local package docs instead of guessing. Keep code simple, explicit and testable. Do not broaden scope until the end-to-end critical path is working.
+16. Final Definition of Done
+PS requirements trace directly to implemented modules.
+No private recipient key stored server-side.
+PQC key establishment and signature operations are real.
+Watermark is embedded/extracted from the actual PDF.
+Decryption event is canonically encoded and signed.
+Ledger finality occurs before artifact release.
+Ledger is independently verifiable and tamper-evident.
+Investigator can return VERIFIED or INCONCLUSIVE.
+Air-gap can be demonstrated by running with network disabled.
+Repository has tests, Docker Compose, docs and demo data.
+Unbuilt production features are clearly labeled as future evolution.
+References / Verification Notes
+NIST FIPS 204: Module-Lattice-Based Digital Signature Standard (ML-DSA).
+Open Quantum Safe liboqs documentation: standardized ML-KEM / ML-DSA support and examples.
+The implementation should pin exact library versions and re-check algorithm identifiers at build time; do not copy unverified package names from memory.

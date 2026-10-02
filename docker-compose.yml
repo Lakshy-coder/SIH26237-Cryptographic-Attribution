@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: sih
+      POSTGRES_PASSWORD: sihpassword
+      POSTGRES_DB: sihdb
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sih -d sihdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python
+    command: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://sih:sihpassword@db:5432/sihdb
+      - LEDGER_URLS=http://validator1:8001,http://validator2:8002,http://validator3:8003
+
+  validator1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python
+    command: uvicorn ledger.node:app --host 0.0.0.0 --port 8001
+    volumes:
+      - .:/app
+    environment:
+      - NODE_ID=node_1
+      - PORT=8001
+      - LEDGER_URLS=http://validator1:8001,http://validator2:8002,http://validator3:8003
+
+  validator2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python
+    command: uvicorn ledger.node:app --host 0.0.0.0 --port 8002
+    volumes:
+      - .:/app
+    environment:
+      - NODE_ID=node_2
+      - PORT=8002
+      - LEDGER_URLS=http://validator1:8001,http://validator2:8002,http://validator3:8003
+
+  validator3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python
+    command: uvicorn ledger.node:app --host 0.0.0.0 --port 8003
+    volumes:
+      - .:/app
+    environment:
+      - NODE_ID=node_3
+      - PORT=8003
+      - LEDGER_URLS=http://validator1:8001,http://validator2:8002,http://validator3:8003
+
+  tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python
+    command: pytest -v /app/backend/tests /app/crypto/tests /app/watermark/tests /app/ledger/tests /app/agent/tests
+    volumes:
+      - .:/app
+    depends_on:
+      - backend
+      - validator1
+      - validator2
+      - validator3
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - LEDGER_URLS=http://validator1:8001,http://validator2:8002,http://validator3:8003

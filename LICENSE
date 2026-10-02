@@ -1,0 +1,13 @@
+PROPRIETARY ALL-RIGHTS-RESERVED LICENSE
+
+Copyright (c) 2026 Lakshy Rana / CODER_CUTIES
+All rights reserved.
+
+This project and its original source code, assets, and documentation are proprietary and are NOT open-source software. 
+
+Unauthorized use, copying, modification, redistribution, sublicensing, commercial/production deployment, hosting, and creation of derivative works of this software, in whole or in part, in any form or via any medium, is strictly prohibited and requires prior written permission from the copyright holder(s).
+
+THIRD-PARTY DEPENDENCIES
+This software incorporates and links to various third-party dependencies and open-source libraries (e.g., liboqs, liboqs-python, PyMuPDF, PyWavelets, NumPy, OpenCV, FastAPI, PostgreSQL clients, React, Vite). Those third-party components are not owned by this project and remain governed by their respective original licenses. This proprietary license explicitly preserves the separate licenses of those third-party dependencies and does not claim ownership over them.
+
+For permission requests, licensing inquiries, or other communications, please contact the repository owner.

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+cryptography
+numpy
+opencv-python-headless
+PyWavelets
+pytest
+httpx
+pymupdf
+psycopg2-binary
+sqlalchemy
+pydantic
+pydantic-settings
+python-multipart
