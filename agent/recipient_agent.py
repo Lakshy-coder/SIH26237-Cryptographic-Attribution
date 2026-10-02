@@ -25,6 +25,25 @@ class RecipientAgent:
         })
         resp.raise_for_status()
 
+    def _wait_for_ledger_finality(self, wm_ref_b64: str, timeout_s: float = 5.0):
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            for url in self.ledger_urls:
+                try:
+                    resp = httpx.get(f"{url}/chain", timeout=3)
+                    if resp.status_code != 200:
+                        continue
+                    chain = resp.json()
+                    for block in chain:
+                        for tx in block.get("events", []):
+                            event = tx.get("event", {})
+                            if event.get("watermark_ref") == wm_ref_b64:
+                                return True
+                except Exception:
+                    pass
+            time.sleep(0.25)
+        return False
+
     def perform_decryption_flow(self, document_id: str, out_path: str):
         # 1. Start session
         resp = httpx.post(f"{self.backend_url}/api/sessions", json={
@@ -58,6 +77,7 @@ class RecipientAgent:
         # wm_ref = SHAKE256(session_id || document_sha256 || recipient_signing_key_hash || client_nonce || server_nonce || watermark_algorithm_version)
         wm_input = (data["session_id"] + data["document_hash"] + sig_pk_hash + client_nonce + server_nonce + "dwt-dct-qim-v1").encode()
         wm_ref = hash_shake256(wm_input, 12)
+        wm_ref_b64 = base64.b64encode(wm_ref).decode()
         
         # 5. Embed Watermark
         wm_pdf = embed_watermark_pdf(plaintext_pdf, wm_ref)
@@ -72,7 +92,7 @@ class RecipientAgent:
             "document_sha256": data["document_hash"],
             "recipient_id": self.agent_id,
             "recipient_signing_key_hash": sig_pk_hash,
-            "watermark_ref": base64.b64encode(wm_ref).decode(),
+            "watermark_ref": wm_ref_b64,
             "watermark_algorithm": "dwt-dct-qim-v1",
             "client_nonce": client_nonce,
             "server_nonce": server_nonce,
@@ -92,27 +112,28 @@ class RecipientAgent:
             "public_key_reference": sig_pk_hash
         }
         
-        success = False
+        accepted = 0
         for url in self.ledger_urls:
             try:
-                resp = httpx.post(f"{url}/submit_event", json=tx)
+                resp = httpx.post(f"{url}/submit_event", json=tx, timeout=5)
                 if resp.status_code == 200:
-                    success = True
-                    break
+                    accepted += 1
             except Exception:
                 pass
-                
-        if not success:
+        
+        if accepted == 0:
             raise Exception("Failed to submit event to ledger")
             
-        # Optional: trigger block proposal on ledger
-        try:
-            httpx.post(f"{self.ledger_urls[0]}/propose_block")
-        except:
-            pass
-            
+        # Trigger block proposal on all ledger nodes to reduce finality races.
+        for url in self.ledger_urls:
+            try:
+                httpx.post(f"{url}/propose_block", timeout=5)
+            except Exception:
+                pass
+        
         # 9. Wait for Finality
-        time.sleep(1) # simulate polling
+        if not self._wait_for_ledger_finality(wm_ref_b64):
+            raise TimeoutError("Ledger finality timeout before watermark was visible")
         
         # 10. Save file
         with open(out_path, "wb") as f:

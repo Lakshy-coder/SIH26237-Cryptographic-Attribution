@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ import base64
 app = FastAPI(title=f"Ledger Node {os.getenv('NODE_ID', 'node')}")
 storage = LedgerStorage()
 pending_events = []
+proposal_lock = asyncio.Lock()
 
 # Generate validator keypair
 VALIDATOR_PK, VALIDATOR_SK = generate_sig_keypair()
@@ -30,6 +32,9 @@ class BlockProposal(BaseModel):
 
 @app.post("/submit_event")
 async def submit_event(tx: DecryptionEventTx):
+    tx_id = tx.tx_id
+    if any(existing.get("tx_id") == tx_id for existing in pending_events):
+        return {"status": "accepted", "duplicate": True}
     pending_events.append(tx.model_dump())
     return {"status": "accepted"}
 
@@ -75,53 +80,62 @@ async def commit(proposal: BlockProposal):
                 raise HTTPException(status_code=400, detail="Invalid endorsement signature")
                 
         storage.add_block(block)
+        pending_events[:] = [
+            e for e in pending_events
+            if e.get("tx_id") not in {tx.get("tx_id") for tx in block.events}
+        ]
         return {"status": "committed"}
     return {"status": "ignored"}
 
 @app.post("/propose_block")
 async def propose_block():
-    if not pending_events:
-        return {"status": "no_events"}
-        
-    latest = storage.get_latest_block()
-    block = Block(
-        height=latest.height + 1,
-        previous_hash=latest.hash,
-        events=pending_events.copy()
-    )
-    block.proposer_node_id = os.getenv("NODE_ID", "node_1")
-    
-    # Collect endorsements
-    block_dict = block.to_dict()
-    endorsements = []
-    
-    async with httpx.AsyncClient() as client:
-        for url in LEDGER_URLS:
-            if url:
-                try:
-                    resp = await client.post(f"{url}/endorse", json={"block_dict": block_dict})
-                    if resp.status_code == 200:
-                        endorsements.append(resp.json())
-                except Exception as e:
-                    pass
-                    
-    # M-of-N (2 of 3)
-    if len(endorsements) >= 2:
-        block.validator_signatures = endorsements
+    async with proposal_lock:
+        if not pending_events:
+            return {"status": "no_events"}
+
+        node_id = os.getenv("NODE_ID", "node_1")
+        if node_id != "node_1":
+            return {"status": "ignored", "reason": "not_leader"}
+
+        latest = storage.get_latest_block()
+        block = Block(
+            height=latest.height + 1,
+            previous_hash=latest.hash,
+            events=pending_events.copy()
+        )
+        block.proposer_node_id = node_id
+
+        # Collect endorsements
         block_dict = block.to_dict()
-        
-        # Commit to all
+        endorsements = []
+
         async with httpx.AsyncClient() as client:
             for url in LEDGER_URLS:
                 if url:
                     try:
-                        await client.post(f"{url}/commit", json={"block_dict": block_dict})
+                        resp = await client.post(f"{url}/endorse", json={"block_dict": block_dict})
+                        if resp.status_code == 200:
+                            endorsements.append(resp.json())
                     except Exception:
                         pass
-        pending_events.clear()
-        return {"status": "committed", "block_hash": block.hash, "height": block.height}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to reach quorum")
+
+        # M-of-N (2 of 3)
+        if len(endorsements) >= 2:
+            block.validator_signatures = endorsements
+            block_dict = block.to_dict()
+
+            # Commit to all
+            async with httpx.AsyncClient() as client:
+                for url in LEDGER_URLS:
+                    if url:
+                        try:
+                            await client.post(f"{url}/commit", json={"block_dict": block_dict})
+                        except Exception:
+                            pass
+            pending_events.clear()
+            return {"status": "committed", "block_hash": block.hash, "height": block.height}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to reach quorum")
 
 @app.get("/chain")
 def get_chain():

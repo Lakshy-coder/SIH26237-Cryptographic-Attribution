@@ -4,7 +4,8 @@ cryptography
 numpy
 opencv-python-headless
 PyWavelets
-pytest
+pytest==8.3.5
+pluggy==1.6.0
 httpx
 pymupdf
 psycopg2-binary
